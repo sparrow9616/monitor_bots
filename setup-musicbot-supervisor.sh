@@ -677,17 +677,22 @@ check_bot_memory() {
     if [ ! -z "$pid" ] && kill -0 "$pid" 2>/dev/null; then
         local memory=$(ps -p "$pid" -o rss= 2>/dev/null | awk '{print $1/1024}')
         if [ ! -z "$memory" ]; then
-            echo "${memory}MB"
-            if (( $(echo "$memory > 500" | bc -l) )); then
-                return 1
-            fi
+            printf "%.1f" "$memory"
         else
             echo "N/A"
+            return 2
         fi
     else
         echo "N/A"
+        return 2
     fi
-    return 0
+    
+    # Return status based on memory usage
+    if (( $(echo "$memory > 500" | bc -l) )); then
+        return 1  # High memory
+    else
+        return 0  # Normal memory
+    fi
 }
 
 check_bot_errors() {
@@ -696,10 +701,13 @@ check_bot_errors() {
     local log_file="/var/log/supervisor/${log_name}.log"
     
     if [ -f "$log_file" ]; then
-        local error_count=$(tail -100 "$log_file" 2>/dev/null | grep -c -i "error\|exception\|traceback" || echo "0")
+        local error_count=$(tail -100 "$log_file" 2>/dev/null | grep -c -i "error\|exception\|traceback" 2>/dev/null || echo "0")
+        # Clean the error count to ensure it's just a number
+        error_count=$(echo "$error_count" | tr -d '\n\r' | grep -o '[0-9]*' | head -1)
+        [ -z "$error_count" ] && error_count="0"
         echo "$error_count"
         
-        if [ "$error_count" -gt 10 ]; then
+        if [ "$error_count" -gt 10 ] 2>/dev/null; then
             return 1
         fi
     else
@@ -717,8 +725,6 @@ monitor_single_bot() {
     
     local status=$(get_bot_status "$bot_name")
     local uptime=$(get_bot_uptime "$bot_name")
-    local memory=$(check_bot_memory "$bot_name")
-    local errors=$(check_bot_errors "$bot_name")
     
     case $status in
         "RUNNING")
@@ -735,20 +741,32 @@ monitor_single_bot() {
             ;;
     esac
     
-    if [ "$memory" != "N/A" ]; then
-        if check_bot_memory "$bot_name"; then
-            print_info "Memory: $memory"
+    # Memory check
+    local memory_result
+    memory_result=$(check_bot_memory "$bot_name")
+    local memory_status=$?
+    
+    if [ "$memory_result" != "N/A" ]; then
+        if [ $memory_status -eq 0 ]; then
+            print_info "Memory: ${memory_result}MB"
+        elif [ $memory_status -eq 1 ]; then
+            print_warning "Memory: ${memory_result}MB (HIGH!)"
         else
-            print_warning "Memory: $memory (HIGH!)"
+            print_warning "Memory: $memory_result"
         fi
     else
-        print_warning "Memory: $memory"
+        print_warning "Memory: $memory_result"
     fi
     
-    if [ "$errors" -gt 10 ]; then
-        print_warning "Recent errors: $errors (HIGH!)"
+    # Error check
+    local error_result
+    error_result=$(check_bot_errors "$bot_name")
+    local error_status=$?
+    
+    if [ $error_status -eq 1 ]; then
+        print_warning "Recent errors: $error_result (HIGH!)"
     else
-        print_info "Recent errors: $errors"
+        print_info "Recent errors: $error_result"
     fi
     
     if [ -d "$bot_dir" ]; then
