@@ -109,11 +109,245 @@ install_dependencies() {
     fi
 }
 
-# Auto-detect music bot directories
+# Check if supervisor is already configured and offer management options
+check_existing_setup() {
+    if [[ -f "/etc/supervisor/conf.d/musicbots.conf" ]] && systemctl is-active supervisor >/dev/null 2>&1; then
+        print_info "Existing music bot supervisor setup detected!"
+        
+        echo -e "\n${CYAN}Current bot status:${NC}"
+        supervisorctl status musicbots:* 2>/dev/null || echo "No bots currently configured"
+        
+        echo -e "\n${CYAN}Setup Management Options:${NC}"
+        echo -e "  ${YELLOW}1${NC} - Add new bots to existing setup"
+        echo -e "  ${YELLOW}2${NC} - Remove existing bots"
+        echo -e "  ${YELLOW}3${NC} - Completely reinstall (remove all and start fresh)"
+        echo -e "  ${YELLOW}4${NC} - Continue with current setup (no changes)"
+        echo -e "  ${YELLOW}5${NC} - Exit"
+        
+        while true; do
+            echo ""
+            read -p "Your choice: " management_choice
+            
+            case "$management_choice" in
+                "1")
+                    print_info "Adding new bots to existing setup..."
+                    return 0  # Continue with normal detection/setup
+                    ;;
+                "2")
+                    manage_existing_bots
+                    exit 0
+                    ;;
+                "3")
+                    print_warning "Completely reinstalling supervisor setup..."
+                    cleanup_existing_setup
+                    return 0  # Continue with fresh setup
+                    ;;
+                "4")
+                    print_info "Keeping current setup unchanged."
+                    exit 0
+                    ;;
+                "5")
+                    print_info "Exiting..."
+                    exit 0
+                    ;;
+                *)
+                    print_error "Invalid choice. Please enter 1, 2, 3, 4, or 5."
+                    ;;
+            esac
+        done
+    fi
+    return 0  # No existing setup, continue normally
+}
+
+# Function to manage existing bots (add/remove)
+manage_existing_bots() {
+    print_info "Managing existing bots..."
+    
+    # Get current bots from supervisor config
+    local current_bots=()
+    if [[ -f "/etc/supervisor/conf.d/musicbots.conf" ]]; then
+        while IFS= read -r line; do
+            if [[ "$line" =~ ^\[program:(.+)-musicbot\] ]]; then
+                local bot_name="${BASH_REMATCH[1]}"
+                current_bots+=("$bot_name")
+            fi
+        done < "/etc/supervisor/conf.d/musicbots.conf"
+    fi
+    
+    if [[ ${#current_bots[@]} -eq 0 ]]; then
+        print_warning "No bots found in current configuration"
+        return
+    fi
+    
+    echo -e "\n${CYAN}Current bots:${NC}"
+    for i in "${!current_bots[@]}"; do
+        local bot_name="${current_bots[$i]}"
+        local status=$(supervisorctl status "musicbots:${bot_name}-musicbot" 2>/dev/null | awk '{print $2}' || echo "UNKNOWN")
+        echo -e "${BLUE}[$((i+1))]${NC} $bot_name (Status: $status)"
+    done
+    
+    echo -e "\n${CYAN}Remove bots:${NC}"
+    echo -e "  ${YELLOW}1,2,3${NC} - Remove specific bots (comma-separated)"
+    echo -e "  ${YELLOW}all${NC} - Remove all bots"
+    echo -e "  ${YELLOW}cancel${NC} - Cancel and exit"
+    
+    while true; do
+        echo ""
+        read -p "Enter bots to remove: " remove_choice
+        
+        case "$remove_choice" in
+            "all"|"ALL")
+                print_warning "Removing all bots..."
+                for bot_name in "${current_bots[@]}"; do
+                    remove_bot_from_supervisor "$bot_name"
+                done
+                cleanup_supervisor_config
+                print_success "All bots removed successfully!"
+                break
+                ;;
+            "cancel"|"CANCEL"|"c"|"C")
+                print_info "Operation cancelled"
+                return
+                ;;
+            *[0-9]*)
+                # Parse comma-separated numbers
+                IFS=',' read -ra REMOVE_CHOICES <<< "$remove_choice"
+                local bots_to_remove=()
+                local valid=true
+                
+                for num in "${REMOVE_CHOICES[@]}"; do
+                    # Remove spaces
+                    num=$(echo "$num" | tr -d ' ')
+                    if [[ "$num" =~ ^[0-9]+$ ]] && [[ "$num" -ge 1 ]] && [[ "$num" -le ${#current_bots[@]} ]]; then
+                        bots_to_remove+=("${current_bots[$((num-1))]}")
+                    else
+                        print_error "Invalid choice: $num"
+                        valid=false
+                        break
+                    fi
+                done
+                
+                if [[ "$valid" == true ]] && [[ ${#bots_to_remove[@]} -gt 0 ]]; then
+                    print_warning "Removing ${#bots_to_remove[@]} bot(s)..."
+                    for bot_name in "${bots_to_remove[@]}"; do
+                        remove_bot_from_supervisor "$bot_name"
+                    done
+                    
+                    # Regenerate supervisor config and monitoring script
+                    regenerate_configs_after_removal
+                    print_success "Selected bots removed successfully!"
+                    break
+                fi
+                ;;
+            *)
+                print_error "Invalid choice. Please enter specific numbers, 'all', or 'cancel'."
+                ;;
+        esac
+    done
+}
+
+# Remove specific bot from supervisor
+remove_bot_from_supervisor() {
+    local bot_name="$1"
+    print_info "Removing bot: $bot_name"
+    
+    # Stop the bot
+    supervisorctl stop "musicbots:${bot_name}-musicbot" 2>/dev/null || true
+    
+    # Remove from supervisor
+    supervisorctl remove "musicbots:${bot_name}-musicbot" 2>/dev/null || true
+    
+    print_success "Bot $bot_name removed from supervisor"
+}
+
+# Regenerate configs after bot removal
+regenerate_configs_after_removal() {
+    print_info "Regenerating configurations..."
+    
+    # Get remaining bots
+    local remaining_bots=()
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^\[program:(.+)-musicbot\] ]]; then
+            local bot_name="${BASH_REMATCH[1]}"
+            # Check if bot still exists and is not being removed
+            if supervisorctl status "musicbots:${bot_name}-musicbot" >/dev/null 2>&1; then
+                # Find the directory for this bot
+                local bot_dir=$(grep -A 20 "^\[program:${bot_name}-musicbot\]" /etc/supervisor/conf.d/musicbots.conf | grep "^directory=" | cut -d'=' -f2)
+                if [[ -n "$bot_dir" ]] && [[ -d "$bot_dir" ]]; then
+                    remaining_bots+=("${bot_name}:${bot_dir}")
+                fi
+            fi
+        fi
+    done < "/etc/supervisor/conf.d/musicbots.conf"
+    
+    if [[ ${#remaining_bots[@]} -gt 0 ]]; then
+        # Create temp file with remaining bots
+        printf '%s\n' "${remaining_bots[@]}" > /tmp/remaining_bots.list
+        
+        # Regenerate supervisor config
+        generate_supervisor_config "/tmp/remaining_bots.list"
+        
+        # Regenerate monitoring script
+        generate_monitoring_script "/tmp/remaining_bots.list"
+        
+        # Reload supervisor
+        supervisorctl reread >/dev/null 2>&1
+        supervisorctl update >/dev/null 2>&1
+        
+        rm -f /tmp/remaining_bots.list
+    else
+        cleanup_supervisor_config
+    fi
+}
+
+# Cleanup supervisor configuration when no bots remain
+cleanup_supervisor_config() {
+    print_info "Cleaning up supervisor configuration..."
+    
+    # Stop all musicbots
+    supervisorctl stop musicbots:* 2>/dev/null || true
+    
+    # Remove the config file
+    rm -f /etc/supervisor/conf.d/musicbots.conf
+    
+    # Remove monitoring script
+    rm -f /root/monitor_all_bots.sh
+    
+    # Reload supervisor
+    supervisorctl reread >/dev/null 2>&1
+    supervisorctl update >/dev/null 2>&1
+    
+    print_success "Supervisor configuration cleaned up"
+}
+
+# Cleanup existing setup completely
+cleanup_existing_setup() {
+    print_warning "Removing existing setup completely..."
+    
+    # Stop all bots
+    supervisorctl stop musicbots:* 2>/dev/null || true
+    
+    # Remove supervisor config
+    rm -f /etc/supervisor/conf.d/musicbots.conf
+    
+    # Remove monitoring script
+    rm -f /root/monitor_all_bots.sh
+    
+    # Remove cron jobs
+    (crontab -l 2>/dev/null | grep -v "musicbot\|monitor_all_bots") | crontab - 2>/dev/null || true
+    
+    # Reload supervisor
+    supervisorctl reread >/dev/null 2>&1
+    supervisorctl update >/dev/null 2>&1
+    
+    print_success "Existing setup removed completely"
+}
+
+# Auto-detect music bot directories with user selection
 detect_bot_directories() {
     print_info "Auto-detecting music bot directories..."
     
-    local bot_dirs=()
+    local potential_bots=()
     local search_paths=("/root" "/home")
     
     for search_path in "${search_paths[@]}"; do
@@ -124,8 +358,13 @@ detect_bot_directories() {
                 if [[ -d "$dir/.venv" ]] && [[ -f "$dir/.env" ]]; then
                     # Additional check: ensure .env is not empty and contains bot configuration
                     if [[ -s "$dir/.env" ]]; then
-                        bot_dirs+=("$dirname:$dir")
-                        print_success "Found bot directory: $dirname -> $dir"
+                        # Additional validation: check if .env contains essential bot config
+                        if grep -q -E "(API_ID|BOT_TOKEN|SESSION|DATABASE)" "$dir/.env" 2>/dev/null; then
+                            potential_bots+=("$dirname:$dir")
+                            print_success "Found potential bot: $dirname -> $dir"
+                        else
+                            print_warning "Skipping $dirname: .env missing essential configuration"
+                        fi
                     else
                         print_warning "Skipping $dirname: .env file is empty"
                     fi
@@ -137,6 +376,95 @@ detect_bot_directories() {
             done < <(find "$search_path" -maxdepth 1 -type d -print0 2>/dev/null)
         fi
     done
+    
+    if [[ ${#potential_bots[@]} -eq 0 ]]; then
+        print_warning "No valid music bot directories found"
+        return 1
+    fi
+    
+    # Let user select which bots to deploy
+    select_bots_for_deployment "${potential_bots[@]}"
+}
+
+# Function to let user select which bots to deploy
+select_bots_for_deployment() {
+    local potential_bots=("$@")
+    local selected_bots=()
+    
+    echo -e "\n${CYAN}🤖 Select bots to deploy:${NC}"
+    echo -e "${YELLOW}Found ${#potential_bots[@]} potential bot(s). Choose which ones to deploy:${NC}\n"
+    
+    for i in "${!potential_bots[@]}"; do
+        local bot_config="${potential_bots[$i]}"
+        local bot_name=$(echo "$bot_config" | cut -d':' -f1)
+        local bot_dir=$(echo "$bot_config" | cut -d':' -f2)
+        
+        echo -e "${BLUE}[$((i+1))]${NC} $bot_name (${bot_dir})"
+        
+        # Show .env validation status
+        if grep -q -E "(API_ID|BOT_TOKEN)" "$bot_dir/.env" 2>/dev/null; then
+            echo -e "    ${GREEN}✓ Configuration looks valid${NC}"
+        else
+            echo -e "    ${YELLOW}⚠ Configuration may be incomplete${NC}"
+        fi
+    done
+    
+    echo -e "\n${CYAN}Options:${NC}"
+    echo -e "  ${YELLOW}a${NC} - Deploy ALL bots"
+    echo -e "  ${YELLOW}1,2,3${NC} - Deploy specific bots (comma-separated)"
+    echo -e "  ${YELLOW}n${NC} - Skip auto-detection, configure manually"
+    
+    while true; do
+        echo ""
+        read -p "Your choice: " choice
+        
+        case "$choice" in
+            "a"|"A"|"all"|"ALL")
+                selected_bots=("${potential_bots[@]}")
+                print_success "Selected all ${#selected_bots[@]} bots for deployment"
+                break
+                ;;
+            "n"|"N"|"none"|"NONE")
+                print_info "Skipping auto-detection. Use --interactive for manual configuration."
+                return 1
+                ;;
+            *[0-9]*)
+                # Parse comma-separated numbers
+                IFS=',' read -ra CHOICES <<< "$choice"
+                selected_bots=()
+                local valid=true
+                
+                for num in "${CHOICES[@]}"; do
+                    # Remove spaces
+                    num=$(echo "$num" | tr -d ' ')
+                    if [[ "$num" =~ ^[0-9]+$ ]] && [[ "$num" -ge 1 ]] && [[ "$num" -le ${#potential_bots[@]} ]]; then
+                        selected_bots+=("${potential_bots[$((num-1))]}")
+                    else
+                        print_error "Invalid choice: $num"
+                        valid=false
+                        break
+                    fi
+                done
+                
+                if [[ "$valid" == true ]] && [[ ${#selected_bots[@]} -gt 0 ]]; then
+                    print_success "Selected ${#selected_bots[@]} bot(s) for deployment"
+                    break
+                fi
+                ;;
+            *)
+                print_error "Invalid choice. Please enter 'a' for all, specific numbers, or 'n' for none."
+                ;;
+        esac
+    done
+    
+    if [[ ${#selected_bots[@]} -eq 0 ]]; then
+        print_warning "No bots selected for deployment"
+        return 1
+    fi
+    
+    # Store selected bots for later use
+    printf '%s\n' "${selected_bots[@]}" > /tmp/detected_bots.list
+    return 0
     
     if [[ ${#bot_dirs[@]} -eq 0 ]]; then
         print_warning "No music bot directories auto-detected"
@@ -726,6 +1054,9 @@ main_setup() {
     check_root
     check_system
     
+    # Check for existing setup and offer management options
+    check_existing_setup
+    
     # Install dependencies
     install_dependencies
     
@@ -738,9 +1069,9 @@ main_setup() {
         bot_list_file="/tmp/configured_bots.list"
     elif load_config_file; then
         bot_list_file="/tmp/configured_bots.list"
-    elif detect_bot_directories; then
+    elif detect_bot_directories && select_bots_for_deployment; then
         bot_list_file="/tmp/detected_bots.list"
-        print_info "Using auto-detected bot configurations"
+        print_info "Using selected bot configurations"
         echo -e "${YELLOW}If this is incorrect, run with --interactive or create bot-config.conf${NC}"
         sleep 3
     else
