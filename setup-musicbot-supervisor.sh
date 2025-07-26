@@ -118,12 +118,21 @@ detect_bot_directories() {
     
     for search_path in "${search_paths[@]}"; do
         if [[ -d "$search_path" ]]; then
-            # Look for directories with .venv and AnonXMusic or similar patterns
+            # Look for directories with BOTH .venv AND .env (strict requirement)
             while IFS= read -r -d '' dir; do
                 local dirname=$(basename "$dir")
-                if [[ -d "$dir/.venv" ]] && [[ -f "$dir/.env" || -d "$dir/AnonXMusic" || -f "$dir/requirements.txt" ]]; then
-                    bot_dirs+=("$dirname:$dir")
-                    print_success "Found bot directory: $dirname -> $dir"
+                if [[ -d "$dir/.venv" ]] && [[ -f "$dir/.env" ]]; then
+                    # Additional check: ensure .env is not empty and contains bot configuration
+                    if [[ -s "$dir/.env" ]]; then
+                        bot_dirs+=("$dirname:$dir")
+                        print_success "Found bot directory: $dirname -> $dir"
+                    else
+                        print_warning "Skipping $dirname: .env file is empty"
+                    fi
+                else
+                    if [[ -d "$dir/.venv" ]] && [[ ! -f "$dir/.env" ]]; then
+                        print_warning "Skipping $dirname: has .venv but missing .env file"
+                    fi
                 fi
             done < <(find "$search_path" -maxdepth 1 -type d -print0 2>/dev/null)
         fi
