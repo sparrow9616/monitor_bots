@@ -383,7 +383,11 @@ detect_bot_directories() {
     fi
     
     # Let user select which bots to deploy
-    select_bots_for_deployment "${potential_bots[@]}"
+    if select_bots_for_deployment "${potential_bots[@]}"; then
+        return 0
+    else
+        return 1
+    fi
 }
 
 # Function to let user select which bots to deploy
@@ -464,15 +468,6 @@ select_bots_for_deployment() {
     
     # Store selected bots for later use
     printf '%s\n' "${selected_bots[@]}" > /tmp/detected_bots.list
-    return 0
-    
-    if [[ ${#bot_dirs[@]} -eq 0 ]]; then
-        print_warning "No music bot directories auto-detected"
-        return 1
-    fi
-    
-    # Store detected bots for later use
-    printf '%s\n' "${bot_dirs[@]}" > /tmp/detected_bots.list
     return 0
 }
 
@@ -1069,7 +1064,7 @@ main_setup() {
         bot_list_file="/tmp/configured_bots.list"
     elif load_config_file; then
         bot_list_file="/tmp/configured_bots.list"
-    elif detect_bot_directories && select_bots_for_deployment; then
+    elif detect_bot_directories; then
         bot_list_file="/tmp/detected_bots.list"
         print_info "Using selected bot configurations"
         echo -e "${YELLOW}If this is incorrect, run with --interactive or create bot-config.conf${NC}"
