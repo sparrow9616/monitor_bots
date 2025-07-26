@@ -1,7 +1,7 @@
 #!/bin/bash
 # Music Bot Supervisor Setup Script
 # One-click deployment for music bot supervision on any VPS
-# Author: GitHub Copilot
+# Author: sparrow
 # Version: 1.0
 
 set -e  # Exit on any error
@@ -633,10 +633,10 @@ CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 print_header() {
-    echo -e "${PURPLE}================================${NC}"
-    echo -e "${PURPLE}    MUSIC BOTS MONITORING       ${NC}"
-    echo -e "${PURPLE}    $(date)    ${NC}"
-    echo -e "${PURPLE}================================${NC}"
+    clear
+    echo -e "${PURPLE}🎵 Music Bot Monitor - Real-time Status 🎵${NC}"
+    echo -e "${PURPLE}═══════════════════════════════════════════════════════════${NC}"
+    echo ""
 }
 
 print_status() {
@@ -701,10 +701,11 @@ check_bot_errors() {
     local log_file="/var/log/supervisor/${log_name}.log"
     
     if [ -f "$log_file" ]; then
-        local error_count=$(tail -100 "$log_file" 2>/dev/null | grep -c -i "error\|exception\|traceback" 2>/dev/null || echo "0")
-        # Clean the error count to ensure it's just a number
-        error_count=$(echo "$error_count" | tr -d '\n\r' | grep -o '[0-9]*' | head -1)
-        [ -z "$error_count" ] && error_count="0"
+        local error_count=$(tail -100 "$log_file" 2>/dev/null | grep -c -i "error\|exception\|traceback" 2>/dev/null)
+        # Ensure error_count is a valid number
+        if ! [[ "$error_count" =~ ^[0-9]+$ ]]; then
+            error_count="0"
+        fi
         echo "$error_count"
         
         if [ "$error_count" -gt 10 ] 2>/dev/null; then
@@ -721,69 +722,78 @@ monitor_single_bot() {
     local bot_dir=$2
     local display_name=${BOT_DISPLAY_NAMES[$bot_name]}
     
-    echo -e "\n${CYAN}--- $display_name ---${NC}"
-    
+    # Get bot information
     local status=$(get_bot_status "$bot_name")
     local uptime=$(get_bot_uptime "$bot_name")
-    
-    case $status in
-        "RUNNING")
-            print_status "Status: RUNNING (uptime: $uptime)"
-            ;;
-        "STOPPED")
-            print_error "Status: STOPPED"
-            ;;
-        "FATAL")
-            print_error "Status: FATAL"
-            ;;
-        *)
-            print_warning "Status: $status"
-            ;;
-    esac
+    local pid=$(get_bot_pid "$bot_name")
     
     # Memory check
     local memory_result
     memory_result=$(check_bot_memory "$bot_name")
     local memory_status=$?
     
-    if [ "$memory_result" != "N/A" ]; then
-        if [ $memory_status -eq 0 ]; then
-            print_info "Memory: ${memory_result}MB"
-        elif [ $memory_status -eq 1 ]; then
-            print_warning "Memory: ${memory_result}MB (HIGH!)"
-        else
-            print_warning "Memory: $memory_result"
-        fi
-    else
-        print_warning "Memory: $memory_result"
-    fi
-    
     # Error check
     local error_result
     error_result=$(check_bot_errors "$bot_name")
     local error_status=$?
     
+    # Display bot information in attractive format
+    echo -e "${CYAN}Bot: ${YELLOW}$(echo $display_name | sed 's/ Music Bot//')${NC}"
+    
+    # Status line with emoji
+    case $status in
+        "RUNNING")
+            if [ ! -z "$pid" ]; then
+                echo -e "├─ Status: ${GREEN}✅ RUNNING${NC} (PID: $pid, Uptime: $uptime)"
+            else
+                echo -e "├─ Status: ${GREEN}✅ RUNNING${NC} (Uptime: $uptime)"
+            fi
+            ;;
+        "STOPPED")
+            echo -e "├─ Status: ${RED}⏹️ STOPPED${NC}"
+            ;;
+        "FATAL")
+            echo -e "├─ Status: ${RED}💀 FATAL${NC}"
+            ;;
+        *)
+            echo -e "├─ Status: ${YELLOW}⚠️ $status${NC}"
+            ;;
+    esac
+    
+    # Memory line with color coding
+    if [ "$memory_result" != "N/A" ]; then
+        if [ $memory_status -eq 0 ]; then
+            echo -e "├─ Memory: ${GREEN}🟢 ${memory_result}MB${NC} (Normal)"
+        elif [ $memory_status -eq 1 ]; then
+            echo -e "├─ Memory: ${RED}🔴 ${memory_result}MB${NC} (HIGH!)"
+        else
+            echo -e "├─ Memory: ${YELLOW}🟡 $memory_result${NC} (Unknown)"
+        fi
+    else
+        echo -e "├─ Memory: ${YELLOW}🟡 $memory_result${NC} (Unavailable)"
+    fi
+    
+    # Error line with color coding
     if [ $error_status -eq 1 ]; then
-        print_warning "Recent errors: $error_result (HIGH!)"
+        echo -e "├─ Errors: ${YELLOW}🟡 $error_result recent errors${NC}"
+    elif [ "$error_result" -eq 0 ]; then
+        echo -e "├─ Errors: ${GREEN}🟢 $error_result recent errors${NC}"
     else
-        print_info "Recent errors: $error_result"
+        echo -e "├─ Errors: ${BLUE}🔵 $error_result recent errors${NC}"
     fi
     
-    if [ -d "$bot_dir" ]; then
-        print_info "Directory: $bot_dir ✓"
-    else
-        print_error "Directory: $bot_dir (NOT FOUND!)"
-    fi
-    
-    print_info "Process: $bot_name"
+    # Last check timestamp
+    echo -e "└─ Last Check: ${CYAN}$(date '+%Y-%m-%d %H:%M:%S')${NC}"
+    echo ""
 }
 
 show_summary() {
-    echo -e "\n${PURPLE}=== SUMMARY ===${NC}"
+    echo -e "${PURPLE}📊 System Summary:${NC}"
     
     local running=0
     local stopped=0
     local fatal=0
+    local total_memory=0
     
     for bot_name in "${!BOTS[@]}"; do
         local status=$(get_bot_status "$bot_name")
@@ -792,12 +802,35 @@ show_summary() {
             "STOPPED") ((stopped++)) ;;
             "FATAL") ((fatal++)) ;;
         esac
+        
+        # Calculate total memory
+        local memory_result=$(check_bot_memory "$bot_name")
+        if [ "$memory_result" != "N/A" ] && [[ "$memory_result" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+            total_memory=$(echo "$total_memory + $memory_result" | bc -l)
+        fi
     done
     
-    echo -e "Running: ${GREEN}$running${NC}"
-    echo -e "Stopped: ${RED}$stopped${NC}"
-    echo -e "Fatal: ${RED}$fatal${NC}"
-    echo -e "Total: ${BLUE}${#BOTS[@]}${NC}"
+    # Get system load
+    local system_load=$(uptime | awk -F'load average:' '{print $2}' | awk '{print $1}' | sed 's/,//')
+    
+    echo -e "   ${BLUE}•${NC} Total Bots: ${YELLOW}${#BOTS[@]}${NC}"
+    echo -e "   ${BLUE}•${NC} Running: ${GREEN}$running ✅${NC}"
+    if [ $stopped -gt 0 ]; then
+        echo -e "   ${BLUE}•${NC} Stopped: ${RED}$stopped ⏹️${NC}"
+    else
+        echo -e "   ${BLUE}•${NC} Stopped: ${CYAN}$stopped ⭐${NC}"
+    fi
+    if [ $fatal -gt 0 ]; then
+        echo -e "   ${BLUE}•${NC} Fatal: ${RED}$fatal 💀${NC}"
+    fi
+    
+    if (( $(echo "$total_memory > 0" | bc -l) )); then
+        printf "   ${BLUE}•${NC} Memory Total: ${YELLOW}%.1fMB${NC}\n" "$total_memory"
+    fi
+    
+    if [ ! -z "$system_load" ]; then
+        echo -e "   ${BLUE}•${NC} System Load: ${CYAN}$system_load${NC}"
+    fi
 }
 
 restart_failed_bots() {
