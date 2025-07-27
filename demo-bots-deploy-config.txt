@@ -1,0 +1,89 @@
+# Music Bot Batch Deployment Configuration
+# Complete configuration file for deploying multiple bots with .env settings
+
+# GitHub Credentials (for private repositories)
+[GITHUB]
+USERNAME=your_github_username
+PASSWORD=your_github_password_or_token
+
+# Bot Configuration Format:
+# [BOT:bot_name]
+# REPO=repository_url
+# BRANCH=branch_name (optional, defaults to main)
+# [ENV]
+# ... all .env variables here ...
+
+# Example Bot 1
+[BOT:amiop]
+REPO=https://github.com/AnonymousX1025/AnonXMusic
+BRANCH=main
+[ENV]
+API_ID=123456
+API_HASH=your_api_hash_here
+BOT_TOKEN=123456:ABC-DEF123456
+BOT_USERNAME=AmiBot_Username
+DATABASE_URL=mongodb://localhost:27017/amiop
+DATABASE_NAME=amiop
+SESSION_NAME=amiop
+STRING_SESSION=
+DURATION_LIMIT_MIN=60
+QUEUE_LIMIT=10
+OWNER_ID=123456789
+SUDO_USERS=123456789,987654321
+LOG_GROUP_ID=
+SUPPORT_CHANNEL=
+SUPPORT_CHAT=
+AUTO_LEAVING_ASSISTANT=True
+ASSISTANT_PREFIX=!
+
+# Example Bot 2
+[BOT:sri]
+REPO=https://github.com/TeamYukki/YukkiMusicBot
+BRANCH=master
+[ENV]
+API_ID=123456
+API_HASH=your_api_hash_here
+BOT_TOKEN=123456:XYZ-GHI789012
+BOT_USERNAME=SriBot_Username
+DATABASE_URL=mongodb://localhost:27017/sri
+DATABASE_NAME=sri
+SESSION_NAME=sri
+STRING_SESSION=
+DURATION_LIMIT_MIN=60
+QUEUE_LIMIT=10
+OWNER_ID=123456789
+SUDO_USERS=123456789,987654321
+LOG_GROUP_ID=
+SUPPORT_CHANNEL=
+SUPPORT_CHAT=
+AUTO_LEAVING_ASSISTANT=True
+ASSISTANT_PREFIX=.
+
+# Example Bot 3 (Custom/Private Repository)
+[BOT:mybot]
+REPO=https://github.com/yourusername/your-private-musicbot
+BRANCH=main
+[ENV]
+API_ID=123456
+API_HASH=your_api_hash_here
+BOT_TOKEN=123456:DEF-JKL345678
+BOT_USERNAME=MyBot_Username
+DATABASE_URL=mongodb://localhost:27017/mybot
+DATABASE_NAME=mybot
+SESSION_NAME=mybot
+STRING_SESSION=
+DURATION_LIMIT_MIN=60
+QUEUE_LIMIT=10
+OWNER_ID=123456789
+SUDO_USERS=123456789,987654321
+LOG_GROUP_ID=
+SUPPORT_CHANNEL=
+SUPPORT_CHAT=
+AUTO_LEAVING_ASSISTANT=True
+ASSISTANT_PREFIX=/
+
+# Instructions:
+# 1. Edit GitHub credentials if you have private repositories
+# 2. Configure each bot section with repository URL and .env variables
+# 3. Run: ./deploy-musicbot.sh --batch-deploy bots-deploy-config.txt
+# 4. All bots will be deployed automatically with their configurations
