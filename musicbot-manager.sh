@@ -412,7 +412,7 @@ autostart=true
 autorestart=true
 stderr_logfile=/var/log/supervisor/$bot_name.err.log
 stdout_logfile=/var/log/supervisor/$bot_name.out.log
-environment=PATH="$bot_dir/.venv/bin"
+environment=PATH="$bot_dir/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 stopasgroup=true
 killasgroup=true
 EOF
