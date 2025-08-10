@@ -338,41 +338,87 @@ create_supervisor_config() {
         return 1
     fi
     
-    # Find main bot file
-    local main_file=""
-    local common_files=("main.py" "app.py" "bot.py" "start.py" "${bot_name}.py")
+    local start_command=""
+    local working_dir="$bot_dir"
     
-    for file in "${common_files[@]}"; do
-        if [[ -f "$bot_dir/$file" ]]; then
-            main_file="$file"
-            break
+    # First priority: Check for 'start' file
+    if [[ -f "$bot_dir/start" ]]; then
+        print_progress "Found start file for $bot_name, extracting command..."
+        
+        # Read the start file and extract the Python command
+        local start_content=$(cat "$bot_dir/start")
+        
+        # Look for python3 commands (excluding commented lines)
+        local python_cmd=$(echo "$start_content" | grep -v "^#" | grep -E "python3?.*-m|python3.*\.py" | head -1 | sed 's/^[[:space:]]*//')
+        
+        if [[ -n "$python_cmd" ]]; then
+            # Convert python3 to full venv path and handle -m module syntax
+            if [[ "$python_cmd" =~ python3[[:space:]]+-m[[:space:]]+([^[:space:]]+) ]]; then
+                # Handle "python3 -m ModuleName" format
+                local module_name="${BASH_REMATCH[1]}"
+                start_command="$bot_dir/.venv/bin/python -m $module_name"
+                print_info "Using module command: python -m $module_name"
+            elif [[ "$python_cmd" =~ python3[[:space:]]+([^[:space:]]+\.py) ]]; then
+                # Handle "python3 filename.py" format
+                local py_file="${BASH_REMATCH[1]}"
+                start_command="$bot_dir/.venv/bin/python $py_file"
+                print_info "Using Python file: $py_file"
+            else
+                # Generic python3 command
+                start_command=$(echo "$python_cmd" | sed "s|python3|$bot_dir/.venv/bin/python|")
+                print_info "Using generic command: $start_command"
+            fi
         fi
-    done
+    fi
     
-    if [[ -z "$main_file" ]]; then
-        # Try to find any .py file
-        main_file=$(find "$bot_dir" -maxdepth 1 -name "*.py" | head -1 | xargs basename 2>/dev/null || echo "")
+    # Second priority: Look for common main files if no start command found
+    if [[ -z "$start_command" ]]; then
+        print_progress "No start file or command found, checking for common main files..."
+        
+        local main_file=""
+        local common_files=("main.py" "app.py" "bot.py" "run.py" "${bot_name}.py")
+        
+        for file in "${common_files[@]}"; do
+            if [[ -f "$bot_dir/$file" ]]; then
+                main_file="$file"
+                break
+            fi
+        done
+        
+        # Try to find any .py file as last resort
         if [[ -z "$main_file" ]]; then
-            print_error "No Python main file found for $bot_name"
+            main_file=$(find "$bot_dir" -maxdepth 1 -name "*.py" | head -1 | xargs basename 2>/dev/null || echo "")
+        fi
+        
+        if [[ -n "$main_file" ]]; then
+            start_command="$bot_dir/.venv/bin/python $main_file"
+            print_info "Using main file: $main_file"
+        else
+            print_error "No suitable startup file found for $bot_name"
             return 1
         fi
     fi
     
-    print_progress "Creating supervisor config for $bot_name (main file: $main_file)..."
+    print_progress "Creating supervisor config for $bot_name..."
+    print_info "Start command: $start_command"
+    print_info "Working directory: $working_dir"
     
     cat > "$config_file" << EOF
 [program:$bot_name]
-command=$bot_dir/.venv/bin/python $main_file
-directory=$bot_dir
+command=$start_command
+directory=$working_dir
 user=root
 autostart=true
 autorestart=true
 stderr_logfile=/var/log/supervisor/$bot_name.err.log
 stdout_logfile=/var/log/supervisor/$bot_name.out.log
 environment=PATH="$bot_dir/.venv/bin"
+stopasgroup=true
+killasgroup=true
 EOF
     
     print_success "Supervisor config created: $config_file"
+    print_info "Command: $start_command"
     return 0
 }
 
@@ -416,6 +462,228 @@ setup_all_supervisors() {
     create_monitoring_script
     
     return 0
+}
+
+# Deploy single bot function
+deploy_single_bot() {
+    local bot_name="$1"
+    local repo_url="$2"
+    local branch="${3:-main}"
+    
+    print_info "Starting deployment of $bot_name..."
+    
+    # Validate repository first
+    if ! validate_repo "$repo_url"; then
+        print_error "Cannot access repository: $repo_url"
+        return 1
+    fi
+    
+    # Clone repository
+    if ! clone_bot_repo "$bot_name" "$repo_url" "$branch"; then
+        print_error "Failed to clone repository"
+        return 1
+    fi
+    
+    # Setup virtual environment
+    if ! setup_virtual_env "$DEPLOY_BASE_DIR/$bot_name" "$bot_name"; then
+        print_error "Failed to setup virtual environment"
+        return 1
+    fi
+    
+    # Install dependencies
+    if ! install_dependencies "$DEPLOY_BASE_DIR/$bot_name" "$bot_name"; then
+        print_error "Failed to install dependencies"
+        return 1
+    fi
+    
+    # Generate .env template
+    if ! generate_env_template "$DEPLOY_BASE_DIR/$bot_name" "$bot_name"; then
+        print_error "Failed to generate .env template"
+        return 1
+    fi
+    
+    print_success "Bot $bot_name deployed successfully!"
+    print_warning "Please edit $DEPLOY_BASE_DIR/$bot_name/.env with your configuration"
+    return 0
+}
+
+# Parse configuration file
+parse_config_file() {
+    local config_file="$1"
+    local current_section=""
+    local current_bot=""
+    local github_username=""
+    local github_password=""
+    
+    print_info "Parsing configuration file: $config_file"
+    
+    # Arrays to store bot configurations
+    declare -g -A bot_configs
+    declare -g -A bot_env_vars
+    
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        # Skip empty lines and comments
+        [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+        
+        # Remove leading/trailing whitespace
+        line=$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        
+        # Check for section headers
+        if [[ "$line" =~ ^\[([^\]]+)\]$ ]]; then
+            local section="${BASH_REMATCH[1]}"
+            
+            if [[ "$section" == "GITHUB" ]]; then
+                current_section="GITHUB"
+                current_bot=""
+            elif [[ "$section" =~ ^BOT:(.+)$ ]]; then
+                current_bot="${BASH_REMATCH[1]}"
+                current_section="BOT"
+                bot_configs["$current_bot,REPO"]=""
+                bot_configs["$current_bot,BRANCH"]="main"
+            elif [[ "$section" == "ENV" && -n "$current_bot" ]]; then
+                current_section="ENV"
+            fi
+            continue
+        fi
+        
+        # Parse key=value pairs
+        if [[ "$line" =~ ^([^=]+)=(.*)$ ]]; then
+            local key="${BASH_REMATCH[1]}"
+            local value="${BASH_REMATCH[2]}"
+            
+            # Remove quotes from value
+            value=$(echo "$value" | sed 's/^"\(.*\)"$/\1/' | sed "s/^'\(.*\)'$/\1/")
+            
+            case "$current_section" in
+                "GITHUB")
+                    if [[ "$key" == "USERNAME" ]]; then
+                        github_username="$value"
+                        GITHUB_USERNAME="$value"
+                    elif [[ "$key" == "PASSWORD" ]]; then
+                        github_password="$value"
+                        GITHUB_PASSWORD="$value"
+                    fi
+                    ;;
+                "BOT")
+                    if [[ -n "$current_bot" ]]; then
+                        bot_configs["$current_bot,$key"]="$value"
+                    fi
+                    ;;
+                "ENV")
+                    if [[ -n "$current_bot" ]]; then
+                        bot_env_vars["$current_bot,$key"]="$value"
+                    fi
+                    ;;
+            esac
+        fi
+    done < "$config_file"
+    
+    # Set global GitHub credentials
+    export GITHUB_USERNAME GITHUB_PASSWORD
+    
+    return 0
+}
+
+# Deploy all bots from configuration
+batch_deploy() {
+    local config_file="$1"
+    
+    if [[ ! -f "$config_file" ]]; then
+        print_error "Configuration file not found: $config_file"
+        return 1
+    fi
+    
+    print_info "Starting batch deployment from $config_file"
+    
+    # Parse configuration file
+    if ! parse_config_file "$config_file"; then
+        print_error "Failed to parse configuration file"
+        return 1
+    fi
+    
+    # Get list of bots from configuration
+    local bots=()
+    for key in "${!bot_configs[@]}"; do
+        if [[ "$key" =~ ^([^,]+),REPO$ ]]; then
+            local bot_name="${BASH_REMATCH[1]}"
+            if [[ -n "${bot_configs["$bot_name,REPO"]}" ]]; then
+                bots+=("$bot_name")
+            fi
+        fi
+    done
+    
+    if [[ ${#bots[@]} -eq 0 ]]; then
+        print_warning "No bot configurations found in $config_file"
+        return 1
+    fi
+    
+    print_info "Found ${#bots[@]} bot(s) to deploy: ${bots[*]}"
+    
+    local success_count=0
+    local total_count=${#bots[@]}
+    
+    # Deploy each bot
+    for bot_name in "${bots[@]}"; do
+        local repo_url="${bot_configs["$bot_name,REPO"]}"
+        local branch="${bot_configs["$bot_name,BRANCH"]:-main}"
+        
+        print_info "Deploying bot $bot_name ($((success_count + 1))/$total_count)..."
+        
+        if deploy_single_bot "$bot_name" "$repo_url" "$branch"; then
+            # Apply environment variables from config
+            local env_file="$DEPLOY_BASE_DIR/$bot_name/.env"
+            if [[ -f "$env_file" ]]; then
+                print_progress "Applying environment configuration for $bot_name..."
+                
+                # Backup original .env
+                cp "$env_file" "$env_file.template.backup"
+                
+                # Create new .env with config values
+                : > "$env_file"  # Clear file
+                
+                # Add header
+                echo "# $bot_name Bot Configuration (Auto-generated from batch config)" >> "$env_file"
+                echo "# Generated on: $(date)" >> "$env_file"
+                echo "" >> "$env_file"
+                
+                # Add environment variables from config
+                for key in "${!bot_env_vars[@]}"; do
+                    if [[ "$key" =~ ^${bot_name},(.+)$ ]]; then
+                        local env_key="${BASH_REMATCH[1]}"
+                        local env_value="${bot_env_vars["$key"]}"
+                        echo "$env_key=$env_value" >> "$env_file"
+                    fi
+                done
+                
+                print_success "Environment configuration applied for $bot_name"
+            fi
+            
+            ((success_count++))
+            print_success "Bot $bot_name deployed successfully ($success_count/$total_count)"
+        else
+            print_error "Failed to deploy bot $bot_name"
+        fi
+        
+        echo ""
+    done
+    
+    print_info "Batch deployment completed: $success_count/$total_count bots deployed successfully"
+    
+    if [[ $success_count -gt 0 ]]; then
+        print_info "Setting up supervisor configurations..."
+        setup_all_supervisors
+        
+        echo -e "\n${GREEN}Batch deployment summary:${NC}"
+        echo -e "  • Successfully deployed: ${GREEN}$success_count${NC} bots"
+        echo -e "  • Failed: ${RED}$((total_count - success_count))${NC} bots"
+        echo -e "  • Supervisor configs created"
+        echo -e "  • Monitoring script ready"
+        
+        return 0
+    else
+        print_error "No bots were deployed successfully"
+        return 1
+    fi
 }
 
 # Create monitoring script
@@ -710,24 +978,37 @@ batch_deploy_menu() {
     print_header
     echo -e "${CYAN}📦 Batch Deploy Bots${NC}\n"
     
-    # List available config files
-    local config_files=($(find . -name "*.txt" -o -name "*.conf" | head -10))
+    # List available config files (only in root directory, exclude hidden files and common patterns)
+    local config_files=()
     
-    if [[ ${#config_files[@]} -gt 0 ]]; then
+    # Look for common config file patterns in root directory only
+    for pattern in "musicbots-config.txt" "*-config.txt" "bots-config.txt" "config.txt" "*.conf"; do
+        while IFS= read -r -d '' file; do
+            # Only add if it's a regular file and not hidden
+            if [[ -f "$file" && ! "$file" =~ ^\./\. ]]; then
+                config_files+=("$file")
+            fi
+        done < <(find . -maxdepth 1 -name "$pattern" -type f -print0 2>/dev/null)
+    done
+    
+    # Remove duplicates and limit to 10
+    local unique_files=($(printf '%s\n' "${config_files[@]}" | sort -u | head -10))
+    
+    if [[ ${#unique_files[@]} -gt 0 ]]; then
         echo -e "${CYAN}Available config files:${NC}"
-        for i in "${!config_files[@]}"; do
-            echo -e "  ${YELLOW}$((i+1)).${NC} ${config_files[i]}"
+        for i in "${!unique_files[@]}"; do
+            echo -e "  ${YELLOW}$((i+1)).${NC} ${unique_files[i]}"
         done
         echo -e "  ${YELLOW}0.${NC} Enter custom path"
         
-        echo -e "\n${CYAN}Select config file (0-${#config_files[@]}):${NC} "
+        echo -e "\n${CYAN}Select config file (0-${#unique_files[@]}):${NC} "
         read -r choice
         
         if [[ "$choice" -eq 0 ]]; then
             echo -e "${CYAN}Enter config file path:${NC} "
             read -r config_file
-        elif [[ "$choice" -ge 1 && "$choice" -le ${#config_files[@]} ]]; then
-            config_file="${config_files[$((choice-1))]}"
+        elif [[ "$choice" -ge 1 && "$choice" -le ${#unique_files[@]} ]]; then
+            config_file="${unique_files[$((choice-1))]}"
         else
             print_error "Invalid choice"
             batch_deploy_menu
@@ -740,17 +1021,35 @@ batch_deploy_menu() {
     
     if [[ -f "$config_file" ]]; then
         print_info "Starting batch deployment from $config_file"
-        # Note: batch_deploy function would need to be implemented
-        print_warning "Batch deploy function needs to be implemented"
-        echo -e "\n${CYAN}Press Enter to continue...${NC}"
-        read -r
+        
+        if batch_deploy "$config_file"; then
+            echo -e "\n${GREEN}Batch deployment completed successfully!${NC}"
+            
+            echo -e "\n${CYAN}What would you like to do next?${NC}"
+            echo -e "${YELLOW}1.${NC} Monitor deployed bots"
+            echo -e "${YELLOW}2.${NC} Setup supervisor for all bots"
+            echo -e "${YELLOW}3.${NC} Return to main menu"
+            echo -e "\n${CYAN}Enter your choice (1-3):${NC} "
+            read -r next_choice
+            
+            case $next_choice in
+                1) monitor_bots_menu ;;
+                2) supervisor_management_menu ;;
+                3) show_main_menu ;;
+                *) show_main_menu ;;
+            esac
+        else
+            print_error "Batch deployment failed"
+            echo -e "\n${CYAN}Press Enter to continue...${NC}"
+            read -r
+            show_main_menu
+        fi
     else
         print_error "Config file not found: $config_file"
         echo -e "\n${CYAN}Press Enter to continue...${NC}"
         read -r
+        show_main_menu
     fi
-    
-    show_main_menu
 }
 
 supervisor_management_menu() {
